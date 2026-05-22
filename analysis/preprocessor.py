@@ -81,8 +81,9 @@ class ReviewPreprocessor:
 
     def _parse_score_text(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        将 "口味5.0 | 环境4.8 | 服务5.0" 解析为独立三列
-        taste_score / environment_score / service_score
+        解析 score_text 字段，兼容两种格式:
+          中文: "口味5.0 | 环境4.8 | 服务5.0"
+          Yelp: "stars:4.0"
         """
         if "score_text" not in df.columns:
             return df
@@ -93,9 +94,19 @@ class ReviewPreprocessor:
             m = re.search(rf"{keyword}(\d+(?:\.\d+)?)", text)
             return float(m.group(1)) if m else None
 
-        df["taste_score"]       = df["score_text"].apply(lambda x: _extract(x, "口味"))
-        df["environment_score"] = df["score_text"].apply(lambda x: _extract(x, "环境"))
-        df["service_score"]     = df["score_text"].apply(lambda x: _extract(x, "服务"))
+        # 检测格式
+        sample = df["score_text"].dropna().head(5).tolist()
+        is_yelp = any("stars:" in str(s) for s in sample)
+
+        if is_yelp:
+            # Yelp 格式: "stars:4.0" → 三个子评分均用综合评分填充
+            df["taste_score"]       = df["score_text"].apply(lambda x: _extract(x, "stars:"))
+            df["environment_score"] = df["taste_score"]
+            df["service_score"]     = df["taste_score"]
+        else:
+            df["taste_score"]       = df["score_text"].apply(lambda x: _extract(x, "口味"))
+            df["environment_score"] = df["score_text"].apply(lambda x: _extract(x, "环境"))
+            df["service_score"]     = df["score_text"].apply(lambda x: _extract(x, "服务"))
 
         return df
 

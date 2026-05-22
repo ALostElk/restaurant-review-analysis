@@ -1,141 +1,172 @@
 # -*- coding: utf-8 -*-
 """
-分析主入口
+分析主入口（已对齐当前 API，移除图数据/时空数据模块）
 用法:
   python analysis/run_analysis.py                          # 全流程
   python analysis/run_analysis.py --module tabular         # 单模块
-  python analysis/run_analysis.py --format excel           # 指定输出格式
+  python analysis/run_analysis.py --module sequential
+  python analysis/run_analysis.py --module text
+  python analysis/run_analysis.py --format excel
 """
 
-import os, sys, argparse
+import os
+import sys
+import argparse
+
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analysis.data_loader import ReviewDataLoader
 from analysis.preprocessor import ReviewPreprocessor
-from analysis.analyzer import TabularAnalyzer, SequentialAnalyzer, GraphAnalyzer, SpatiotemporalAnalyzer
+from analysis.analyzer import TabularAnalyzer, SequentialAnalyzer
 from analysis.text_analysis import TextAnalyzer
 from analysis.strategy import AlertSystem, ReportGenerator
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Yelp 餐饮评论分析流水线")
     parser.add_argument("--input",  default="data/sample_reviews.csv")
     parser.add_argument("--module", default="all",
-                        choices=["all","tabular","sequential","graph","geo","text","strategy"])
-    parser.add_argument("--format", default="all", choices=["json","excel","markdown","all"])
+                        choices=["all", "tabular", "sequential", "text", "strategy"])
+    parser.add_argument("--format", default="all",
+                        choices=["excel", "markdown", "all"])
     parser.add_argument("--output", default="outputs")
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
-    os.makedirs(os.path.join(args.output, "figures"), exist_ok=True)
     os.makedirs(os.path.join(args.output, "datasets"), exist_ok=True)
 
     # ── 加载 & 预处理 ────────────────────────────────────────
-    print(f"加载数据: {args.input}")
+    print(f"[0/3] 加载数据: {args.input}")
     df_raw = ReviewDataLoader.load(args.input)
     ReviewDataLoader.describe(df_raw)
 
-    print("\n预处理中...")
+    print("\n[预处理] 开始...")
     df = ReviewPreprocessor().fit_transform(df_raw)
 
-    run_all = (args.module == "all")
-    report_data = {}
+    run_all    = (args.module == "all")
+    report_data: dict = {}
 
-    # ── 表格数据 ─────────────────────────────────────────────
+    # ── Part 3-① 表格数据 ───────────────────────────────────
     if run_all or args.module == "tabular":
-        print("\n[1/5] 表格数据分析")
-        ta = TabularAnalyzer(df)
-        stats   = ta.basic_stats()
-        ranking = ta.shop_ranking()
-        print(f"  总评论: {stats['总评论数']}  均分: {stats['平均评分']}  店铺: {stats['店铺数']}")
-        print(f"  排名第一: {ranking.iloc[0]['shop_name']} (综合分 {ranking.iloc[0]['综合分']})")
-        report_data["shop_ranking"]   = ranking.to_dict(orient="records")
-        report_data["score_dist"]     = ta.score_distribution().to_dict(orient="records")
-        report_data["order_type"]     = ta.order_type_stats().to_dict(orient="records")
-        report_data["correlation"]    = ta.correlation_matrix().to_dict()
+        print("\n[1/3] 表格数据分析")
+        ta = TabularAnalyzer()
 
-    # ── 序列数据 ─────────────────────────────────────────────
+        eda = ta.eda_summary(df)
+        print(eda.to_string(index=False))
+
+        corr = ta.correlation_analysis(df)
+        print(f"  评分↔情感相关: {corr.loc['review_score','sentiment_label']:.3f}")
+
+        wilson = ta.wilson_ranking(df, min_reviews=5)
+        top1   = wilson.iloc[0]
+        print(f"  Wilson 排名第一: {top1['shop_name']}  "
+              f"(wilson_score={top1['wilson_score']}, n={top1['review_count']})")
+
+        detail, cluster_summary = ta.restaurant_clustering(df, n_clusters=4)
+        print(f"  餐厅聚类汇总:\n{cluster_summary.to_string(index=False)}")
+
+        report_data["eda"]             = eda
+        report_data["wilson_ranking"]  = wilson.head(50)
+        report_data["cluster_detail"]  = detail
+        report_data["cluster_summary"] = cluster_summary
+        report_data["correlation"]     = corr.reset_index()
+
+    # ── Part 3-② 序列数据 ───────────────────────────────────
     if run_all or args.module == "sequential":
-        print("\n[2/5] 序列数据分析")
-        sa = SequentialAnalyzer(df)
-        hourly = sa.hourly_stats()
-        peak   = hourly.loc[hourly["评论数"].idxmax()]
-        burst  = sa.detect_burst()
-        crisis = burst[burst["风险"].isin(["危机","预警"])]
-        rfm    = sa.rfm_segments()
-        seg_ct = rfm["用户类型"].value_counts().to_dict()
-        print(f"  评论高峰: {int(peak['小时'])}:00  ({peak['建议']})")
-        print(f"  差评爆发异常点: {len(crisis)} 个")
-        print(f"  用户分层: {seg_ct}")
-        report_data["hourly_stats"]   = hourly.to_dict(orient="records")
-        report_data["rfm_segments"]   = rfm.to_dict(orient="records")
+        print("\n[2/3] 序列数据分析")
+        sa = SequentialAnalyzer()
 
-    # ── 图数据 ───────────────────────────────────────────────
-    if run_all or args.module == "graph":
-        print("\n[3/5] 图数据分析")
-        ga = GraphAnalyzer(df)
-        dish_sent = ga.dish_sentiment()
-        cooccur   = ga.dish_cooccurrence()
-        kol       = ga.influencer_users()
-        if not dish_sent.empty:
-            top = dish_sent.iloc[0]
-            print(f"  最高频菜品: {top['菜品']} (提及{int(top['提及次数'])}次, 正评{top['正评率%']:.0f}%)")
-        print(f"  菜品共现对数: {len(cooccur)}  KOL用户: {len(kol)} 人")
-        report_data["dish_sentiment"] = dish_sent.head(15).to_dict(orient="records")
-        report_data["dish_cooccur"]   = cooccur.head(15).to_dict(orient="records")
-        report_data["kol_users"]      = kol.to_dict(orient="records")
+        hourly = sa.hourly_pattern(df)
+        peak   = hourly.loc[hourly["count"].idxmax()]
+        print(f"  评论高峰: {int(peak['review_hour'])}:00 ({int(peak['count'])} 条)")
 
-    # ── 时空数据 ─────────────────────────────────────────────
-    if run_all or args.module == "geo":
-        print("\n[4/5] 时空数据分析")
-        geo = SpatiotemporalAnalyzer(df)
-        city_sum = geo.city_summary()
-        site     = geo.site_score()
-        if not city_sum.empty:
-            top_city = city_sum.iloc[0]
-            print(f"  最活跃城市: {top_city['city']} ({int(top_city['评论数'])} 条)")
-        if not site.empty:
-            print(f"  最佳选址: {site.iloc[0]['city']} (评级 {site.iloc[0]['评级']})")
-        report_data["city_summary"] = city_sum.to_dict(orient="records")
-        report_data["site_score"]   = site.to_dict(orient="records")
+        burst = sa.burst_detection(df)
+        alert_days = burst["alert"].sum()
+        print(f"  差评爆发日: {alert_days} 天")
 
-    # ── 文本数据 ─────────────────────────────────────────────
+        decomp = sa.trend_decomposition(df)
+        print(f"  趋势分解方法: {decomp['method'].iloc[0]}  "
+              f"({len(decomp)} 个月)")
+
+        forecast = sa.forecast_trend(df, steps=6)
+        fc_rows  = forecast[forecast["type"] == "forecast"]
+        if not fc_rows.empty:
+            print(f"  未来 6 个月预测评论量: "
+                  f"{fc_rows['count'].tolist()}")
+
+        rfm_detail, rfm_km_summary = sa.rfm_clustering(df, n_clusters=5)
+        rfm_rule = sa.rfm_segmentation(df)
+        print(f"  KMeans RFM 聚类:\n{rfm_km_summary.to_string(index=False)}")
+
+        report_data["hourly"]          = hourly
+        report_data["burst"]           = burst[burst["alert"]]
+        report_data["trend_decomp"]    = decomp
+        report_data["forecast"]        = forecast
+        report_data["rfm_km_detail"]   = rfm_detail
+        report_data["rfm_km_summary"]  = rfm_km_summary
+        report_data["rfm_rule"]        = rfm_rule
+
+    # ── Part 4-② 文本数据 ───────────────────────────────────
     if run_all or args.module == "text":
-        print("\n[5/5] 文本数据分析")
+        print("\n[3/3] 文本数据分析")
         txt = TextAnalyzer()
-        dim_cov    = txt.dimension_coverage(df)
-        neg_words  = txt.neg_signal_words(df)
-        bert_ds    = txt.build_bert_dataset(df)
-        absa_ds    = txt.build_absa_dataset(df)
-        top_dim    = dim_cov.iloc[0] if not dim_cov.empty else None
-        if top_dim is not None:
-            print(f"  最关注维度: {top_dim['维度']} (提及率 {top_dim['提及率%']}%)")
-        neg_top5 = " / ".join(neg_words["词语"].head(5).tolist()) if not neg_words.empty else "-"
-        print(f"  差评信号词: {neg_top5}")
+
+        dim_cov = txt.dimension_coverage(df)
+        print(f"  维度覆盖率 Top1: "
+              f"{dim_cov.iloc[0]['dimension']} "
+              f"({dim_cov.iloc[0]['mention%']}%)")
+
+        asp_mat = txt.aspect_sentiment_matrix(df)
+        worst = asp_mat.sort_values("negative_pct", ascending=False).iloc[0]
+        print(f"  差评率最高维度: {worst['dimension']} ({worst['negative_pct']}%)")
+
+        neg_words = txt.neg_signal_words(df)
+        top5 = " / ".join(neg_words["word"].head(5).tolist()
+                          if "word" in neg_words.columns
+                          else neg_words.iloc[:, 0].head(5).tolist())
+        print(f"  差评信号词 Top5: {top5}")
+
+        topics = txt.topic_modeling(df, n_topics=8)
+        print(f"  LDA 主题数: {len(topics)}，"
+              f"最大主题占比: {topics['proportion'].max()}%")
+
+        clf_result = txt.sentiment_classifier(df)
+        print(f"  TF-IDF+LR 分类准确率: {clf_result['accuracy']:.4f}")
+
+        bert_ds = txt.build_bert_dataset(df)
+        absa_ds = txt.build_absa_dataset(df)
         txt.save_bert_dataset(bert_ds, os.path.join(args.output, "datasets"))
         if not absa_ds.empty:
-            txt.save_absa_pyabsa(absa_ds, os.path.join(args.output, "datasets", "absa_train.txt"))
-        report_data["dim_coverage"] = dim_cov.to_dict(orient="records")
-        report_data["neg_signals"]  = neg_words.head(15).to_dict(orient="records")
+            txt.save_absa_pyabsa(
+                absa_ds,
+                os.path.join(args.output, "datasets", "absa_train.txt")
+            )
 
-    # ── 预警 & 报告 ──────────────────────────────────────────
-    print("\n生成运营报告...")
-    alert = AlertSystem(df)
-    alert_df = alert.generate()
-    warn_ct  = (alert_df["预警等级"] != "正常").sum() if not alert_df.empty else 0
-    print(f"  预警店铺: {warn_ct} 家")
-    report_data["alert_text"] = alert.text_report()
+        report_data["dim_coverage"]   = dim_cov
+        report_data["aspect_matrix"]  = asp_mat
+        report_data["neg_signals"]    = neg_words.head(15)
+        report_data["topics"]         = topics
+        report_data["classifier_acc"] = pd.DataFrame(
+            [{"metric": k, "value": v}
+             for k, v in clf_result["report"].items()
+             if isinstance(v, (int, float))]
+        )
+
+    # ── 差评预警 & 报告 ──────────────────────────────────────
+    print("\n[预警] 扫描差评...")
+    alerts = AlertSystem().run(df)
+    print(f"  触发预警店铺: {len(alerts)} 家")
+    report_data["alerts"] = alerts
 
     gen = ReportGenerator(output_dir=args.output)
-    report = gen.build(df, report_data)
+    if args.format in ("excel", "all"):
+        gen.to_excel(report_data)
+    if args.format in ("markdown", "all"):
+        gen.to_markdown(report_data)
 
-    if args.format in ("json", "all"):    gen.to_json(report)
-    if args.format in ("excel", "all"):   gen.to_excel(report)
-    if args.format in ("markdown", "all"):gen.to_markdown(report)
-
-    print(f"\n全部完成！输出目录: {args.output}/")
+    print(f"\n完成！输出目录: {args.output}/")
 
 
 if __name__ == "__main__":

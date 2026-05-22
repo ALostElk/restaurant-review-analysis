@@ -13,3 +13,16 @@ dist/
 build/
 .DS_Store
 Thumbs.db
+
+# 报告编译产物（不上传）
+report/*.pdf
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc
+report/*.bbl
+report/*.blg
+report/*.synctex.gz
+report/*.fdb_latexmk
+report/*.fls
+report/*.xdv
